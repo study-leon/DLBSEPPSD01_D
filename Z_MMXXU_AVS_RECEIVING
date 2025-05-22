@@ -1,0 +1,141 @@
+FUNCTION z_mmxxu_avs_receiving .
+*"----------------------------------------------------------------------
+*"*"Lokale Schnittstelle:
+*"  IMPORTING
+*"     VALUE(I_RECEIVING) TYPE  ZMMXXS_RECEIVING
+*"     VALUE(I_TESTRUN) TYPE  XFELD OPTIONAL
+*"  EXPORTING
+*"     VALUE(E_MAT_DOC) TYPE  BAPI2017_GM_HEAD_RET-MAT_DOC
+*"     VALUE(E_DOC_YEAR) TYPE  BAPI2017_GM_HEAD_RET-DOC_YEAR
+*"  TABLES
+*"      GOODSMVT_ITEM STRUCTURE  ZMMXXT_RECEIVING
+*"      T_RETURN STRUCTURE  BAPIRET2 OPTIONAL
+*"----------------------------------------------------------------------
+  DATA: lt_return              TYPE TABLE OF bapiret2,
+        ls_return              TYPE bapiret2,
+        ls_goodsmvt_header     TYPE bapi2017_gm_head_01,
+        ls_goodsmvt_code       TYPE bapi2017_gm_code,
+        lt_goodsmvt_item       TYPE TABLE OF bapi2017_gm_item_create,
+        lt_goodsmvt_item_2     TYPE TABLE OF bapi2017_gm_item_create,
+        ls_goodsmvt_item       TYPE bapi2017_gm_item_create,
+        ls_goodsmvt_item_2     TYPE bapi2017_gm_item_create,
+        ls_goodsmvt_item_short TYPE zmmxxt_receiving,
+        lv_pzn_mat             TYPE /ghtigv/pharnr,
+        lv_matnr               TYPE matnr
+        .
+*Übergabewerte "Kopfdaten" von Schnittstelle in Struktur lesen
+  ls_goodsmvt_header-pstng_date = i_receiving-pstng_date.
+  ls_goodsmvt_code-gm_code = '01'.
+
+*Positionsdaten lesen
+  LOOP AT goodsmvt_item INTO ls_goodsmvt_item_short.
+    MOVE-CORRESPONDING ls_goodsmvt_item_short TO ls_goodsmvt_item_2.
+    APPEND ls_goodsmvt_item_2 TO lt_goodsmvt_item_2.
+  ENDLOOP.
+  LOOP AT lt_goodsmvt_item_2 INTO ls_goodsmvt_item.
+
+    ls_goodsmvt_item-move_type = '101'.
+    ls_goodsmvt_item-mvt_ind = 'B'.
+    ls_goodsmvt_item-po_number = i_receiving-po_number.
+
+* Daten aus DB-Tabellen in Struktur lesen
+    SELECT SINGLE werks, meins, matnr FROM ekpo
+      WHERE ebeln EQ @i_receiving-po_number
+      AND ebelp EQ @ls_goodsmvt_item-po_item
+      INTO ( @ls_goodsmvt_item-plant, @ls_goodsmvt_item-entry_uom, @lv_matnr ).
+
+    SELECT SINGLE isocode FROM t006
+      WHERE msehi EQ @ls_goodsmvt_item-entry_uom
+      INTO @ls_goodsmvt_item-entry_uom_iso.
+    .
+*Vorangestellte Nullen hinzufügen
+*Positionsnummer
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = ls_goodsmvt_item-po_item
+      IMPORTING
+        output = ls_goodsmvt_item-po_item.
+*Materialnummer
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = ls_goodsmvt_item-material
+      IMPORTING
+        output = ls_goodsmvt_item-material.
+
+*PZN übernehmen und ggf. Warnung ausgeben
+*lv_pzn_mat = i_receiving-pzn_mat.
+*If lv_pzn_mat NE Feld Bestellung PZN
+*    ls_return-type = 'W'.
+*    ls_return-message = TEXT-002.
+*    APPEND ls_return TO t_return.
+*  ENDIF.
+
+*Fehlermeldung Material ungleich Bestellung - Lieferung
+    IF ls_goodsmvt_item-material NE lv_matnr.
+      ls_return-type = 'E'.
+      CONCATENATE 'Position' ls_goodsmvt_item-po_item TEXT-001 INTO ls_return-message SEPARATED BY space.
+      APPEND ls_return TO lt_return.
+    ENDIF.
+
+    APPEND ls_goodsmvt_item TO lt_goodsmvt_item.
+
+    CLEAR: ls_goodsmvt_item,
+           lv_matnr.
+  ENDLOOP.
+
+
+*Wareneingang buchen
+  IF lt_return IS INITIAL.
+    CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+      EXPORTING
+        goodsmvt_header  = ls_goodsmvt_header
+        goodsmvt_code    = ls_goodsmvt_code
+        testrun          = i_testrun
+      IMPORTING
+        materialdocument = e_mat_doc
+        matdocumentyear  = e_doc_year
+      TABLES
+        goodsmvt_item    = lt_goodsmvt_item
+        return           = lt_return.
+  ENDIF.
+
+*Info Testlauf erfolgreich in Ausgabe schreiben
+  IF i_testrun EQ 'X' AND lt_return[] IS INITIAL.
+    ls_return-type = 'S'.
+    ls_return-message = 'Testlauf erfolgreich'.
+    APPEND ls_return TO lt_return.
+  ENDIF.
+
+*Meldung in Return Tabelle schreiben
+  LOOP AT lt_return ASSIGNING FIELD-SYMBOL(<lf_return>).
+    t_return-type = <lf_return>-type.
+    t_return-id = <lf_return>-id.
+    t_return-number = <lf_return>-number.
+    t_return-message = <lf_return>-message.
+    t_return-log_no = <lf_return>-log_no.
+    t_return-log_msg_no = <lf_return>-log_msg_no.
+    t_return-message_v1 = <lf_return>-message_v1.
+    t_return-message_v2 = <lf_return>-message_v2.
+    t_return-message_v3 = <lf_return>-message_v3.
+    t_return-message_v4 = <lf_return>-message_v4.
+    t_return-parameter = <lf_return>-parameter.
+    t_return-row = <lf_return>-row.
+    t_return-field = <lf_return>-field.
+    t_return-system = <lf_return>-system.
+    APPEND t_return.
+  ENDLOOP.
+
+  IF i_testrun IS INITIAL AND lt_return[] IS INITIAL.
+    CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+      EXPORTING
+        wait = 'X'.
+  ENDIF.
+
+
+  CLEAR:      lt_return,
+              ls_return,
+              ls_goodsmvt_code,
+              ls_goodsmvt_header,
+              lt_goodsmvt_item.
+
+ENDFUNCTION.
